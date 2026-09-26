@@ -4,6 +4,7 @@
 #include <unistd.h>
 #include <sys/wait.h>
 #include <sys/stat.h>
+#include <fcntl.h>
 
 // output redirection & piping
 
@@ -63,10 +64,27 @@ void shell_loop()
 		// input parsing
 		char *token = strtok(buffer, " ");
 		int i = 0;
+		char *outfile = NULL;
 		while (token != NULL)
 		{
-			args[i] = token;
-			i++;
+			if (strcmp(token, ">") == 0)
+			{
+				// filename after >
+				token = strtok(NULL, " ");
+
+				if (token == NULL)
+				{
+					fprintf(stderr, "Missing expected filename after >\n");
+					break;
+				}
+				outfile = token;
+			}
+			else
+			{
+				args[i] = token;
+				i++;
+			}
+
 			token = strtok(NULL, " ");
 		}
 		args[i] = NULL;
@@ -91,6 +109,26 @@ void shell_loop()
 			fprintf(stderr, "Fork Failed");
 		else if (pid == 0)
 		{
+			if (outfile != NULL)
+			{
+
+				int file_descrip = open(outfile, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+
+				if (file_descrip == -1)
+				{
+					perror("open");
+					exit(1);
+				}
+
+				if (dup2(file_descrip, STDOUT_FILENO) == -1)
+				{
+					perror("dup2");
+					close(file_descrip);
+					exit(1);
+				}
+
+				close(file_descrip);
+			}
 			execv(cmd_path, args);
 			perror("execv");
 			exit(1);
