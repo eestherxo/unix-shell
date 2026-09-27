@@ -6,7 +6,39 @@
 #include <sys/stat.h>
 #include <fcntl.h>
 
-// output redirection & piping
+int parse_input(char *buffer, char *args[], char **outfile)
+{
+	// input parsing
+	char *token = strtok(buffer, " ");
+	int i = 0;
+
+	*outfile = NULL;
+
+	while (token != NULL)
+	{
+		if (strcmp(token, ">") == 0)
+		{
+			// filename after >
+			token = strtok(NULL, " ");
+
+			if (token == NULL)
+			{
+				fprintf(stderr, "Missing expected filename after >\n");
+				break;
+			}
+			*outfile = token;
+		}
+		else
+		{
+			args[i] = token;
+			i++;
+		}
+
+		token = strtok(NULL, " ");
+	}
+	args[i] = NULL;
+	return 0;
+}
 
 // manage PATH & external command execution
 char *find_cmd(char *cmd)
@@ -23,7 +55,7 @@ char *find_cmd(char *cmd)
 	char pathcopy[1024];
 	strcpy(pathcopy, path);
 
-	//  tokenize PATH & build possible cmd path
+	// tokenize PATH & build possible cmd path
 	static char possible_path[1024];
 	struct stat statbuffer;
 
@@ -46,7 +78,10 @@ void shell_loop()
 {
 
 	char buffer[1024];
-	char *args[128];
+	char *args1[128];
+	char *args2[128];
+	char *outfile1 = NULL;
+	char *outfile2 = NULL;
 
 	while (1)
 	{
@@ -61,45 +96,145 @@ void shell_loop()
 		if (newline != NULL)
 			*newline = '\0';
 
-		// input parsing
-		char *token = strtok(buffer, " ");
-		int i = 0;
-		char *outfile = NULL;
-		while (token != NULL)
+		char *pipe_symbol = strchr(buffer, '|');
+		if (pipe_symbol != NULL)
 		{
-			if (strcmp(token, ">") == 0)
-			{
-				// filename after >
-				token = strtok(NULL, " ");
 
-				if (token == NULL)
+			*pipe_symbol = '\0';
+
+			char *left_cmd = buffer;
+			char *right_cmd = pipe_symbol + 1;
+
+			if (parse_input(left_cmd, args1, &outfile1) == -1 || parse_input(right_cmd, args2, &outfile2) == -1)
+			{
+				continue;
+			}
+
+			if (args1[0] == NULL || args2[0] == NULL)
+			{
+				fprintf(stderr, "Invalid pipe syntax\n");
+				continue;
+			}
+
+			// pipe execution
+			int pipe_file_descrips[2];
+			if (pipe(pipe_file_descrips) == -1)
+			{
+				perror("pipe");
+				continue;
+			}
+
+			pid_t left_pid = fork();
+			if (left_pid == -1)
+			{
+				perror("fork");
+				close(pipe_file_descrips[0]);
+				close(pipe_file_descrips[1]);
+				continue;
+			}
+
+			if (left_pid == 0)
+			{
+				if (dup2(pipe_file_descrips[1], STDOUT_FILENO) == -1)
 				{
-					fprintf(stderr, "Missing expected filename after >\n");
-					break;
+					perror("dup2");
+					exit(1);
 				}
-				outfile = token;
+
+				close(pipe_file_descrips[0]);
+				close(pipe_file_descrips[1]);
+
+				char *cmd_path = find_cmd(args1[0]);
+				if (cmd_path == NULL)
+				{
+					fprintf(stderr, "%s: Command not found\n", args1[0]);
+					exit(1);
+				}
+
+				execv(cmd_path, args1);
+				perror("execv");
+				exit(1);
 			}
-			else
+
+			pid_t right_pid = fork();
+			if (right_pid == -1)
 			{
-				args[i] = token;
-				i++;
+				perror("fork");
+				close(pipe_file_descrips[0]);
+				close(pipe_file_descrips[1]);
+				waitpid(left_pid, NULL, 0);
+				continue;
 			}
 
-			token = strtok(NULL, " ");
-		}
-		args[i] = NULL;
+			if (right_pid == 0)
+			{
+				if (dup2(pipe_file_descrips[0], STDIN_FILENO) == -1)
+				{
+					perror("dup2");
+					exit(1);
+				}
 
-		if (args[0] != NULL && strcmp(args[0], "exit") == 0)
+				close(pipe_file_descrips[0]);
+				close(pipe_file_descrips[1]);
+
+				if (outfile2 != NULL)
+				{
+					int file_descrip = open(outfile2, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+					if (file_descrip == -1)
+					{
+						perror("open");
+						exit(1);
+					}
+
+					if (dup2(file_descrip, STDOUT_FILENO) == -1)
+					{
+						perror("dup2");
+						close(file_descrip);
+						exit(1);
+					}
+
+					close(file_descrip);
+				}
+
+				char *cmd_path = find_cmd(args2[0]);
+				if (cmd_path == NULL)
+				{
+					fprintf(stderr, "%s: Command not found\n", args2[0]);
+					exit(1);
+				}
+
+				execv(cmd_path, args2);
+				perror("execv");
+				exit(1);
+			}
+
+			close(pipe_file_descrips[0]);
+			close(pipe_file_descrips[1]);
+			waitpid(left_pid, NULL, 0);
+			waitpid(right_pid, NULL, 0);
+			continue;
+		}
+		else
+		{
+
+			if (parse_input(buffer, args1, &outfile1) == -1)
+				continue;
+
+			if (args1[0] == NULL)
+				continue;
+		}
+
+		if (args1[0] != NULL && strcmp(args1[0], "exit") == 0)
 			break;
 
 		// prompt again if no cmd
-		if (args[0] == NULL)
+		if (args1[0] == NULL)
 			continue;
 
-		char *cmd_path = find_cmd(args[0]);
+		char *cmd_path = find_cmd(args1[0]);
 		if (cmd_path == NULL)
 		{
-			fprintf(stderr, "%s: command not found\n", args[0]);
+			fprintf(stderr, "%s: Command not found\n", args1[0]);
 			continue;
 		}
 
@@ -109,10 +244,12 @@ void shell_loop()
 			fprintf(stderr, "Fork Failed");
 		else if (pid == 0)
 		{
-			if (outfile != NULL)
+
+			// output redirection
+			if (outfile1 != NULL)
 			{
 
-				int file_descrip = open(outfile, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+				int file_descrip = open(outfile1, O_WRONLY | O_CREAT | O_TRUNC, 0644);
 
 				if (file_descrip == -1)
 				{
@@ -129,7 +266,7 @@ void shell_loop()
 
 				close(file_descrip);
 			}
-			execv(cmd_path, args);
+			execv(cmd_path, args1);
 			perror("execv");
 			exit(1);
 		}
